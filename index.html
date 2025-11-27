@@ -3,53 +3,265 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Phone Camera — Simple</title>
+  <title>Camera access</title>
+
   <style>
-    body { font-family: Arial, sans-serif; margin: 12px; background:#111; color:#eee; display:flex; flex-direction:column; gap:12px; align-items:center; }
-    video { width:100%; max-width:720px; border-radius:8px; background:#000; }
-    .controls { display:flex; gap:8px; }
-    button { padding:8px 12px; border-radius:6px; background:#2b7; border:none; color:#012; font-weight:600; cursor:pointer; }
-    .info { font-size:0.9rem; opacity:0.9; }
+    :root{
+      --accent: #22c55e;
+      --danger: #ef4444;
+      --blue: #3b82f6;
+      --bg: #111;
+      --fg: #eee;
+    }
+    html,body{height:100%}
+    body {
+      font-family: Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      align-items: center;
+      padding: 14px;
+      margin:0;
+    }
+    .frame {
+      position: relative;
+      width:100%;
+      max-width:720px;
+    }
+    video, canvas, img.preview {
+      width: 100%;
+      border-radius: 10px;
+      background: #000;
+      display:block;
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top:6px;
+    }
+    button, .download {
+      padding: 10px 14px;
+      border-radius: 6px;
+      border: none;
+      font-weight:700;
+      cursor: pointer;
+    }
+    button.primary { background: var(--accent); color:#012; }
+    button.warn { background: var(--danger); color:#fff; }
+    button.ghost { background: #444; color:#fff; }
+    .download {
+      background: var(--blue);
+      color: #fff;
+      text-decoration: none;
+      display: none;
+    }
+    #previewWrapper { width:100%; max-width:720px; }
+    .small { font-size:0.9rem; opacity:0.9; margin-top:6px; text-align:center; }
+    /* flash overlay for capture */
+    .flash {
+      position:absolute;
+      top:0; left:0; right:0; bottom:0;
+      background: white;
+      opacity:0;
+      pointer-events:none;
+      border-radius:10px;
+      transition: opacity 120ms ease-out;
+    }
+    .flash.on { opacity:0.9; transition: opacity 80ms ease-in; }
+    /* device selector dropdown */
+    select { padding:8px 10px; border-radius:6px; background:#222; color:#fff; border:none; }
   </style>
 </head>
 <body>
-  <h2>Phone Camera (Browser)</h2>
-  <video id="video" autoplay playsinline></video>
-  <div class="controls">
-    <button id="startBtn">Start camera</button>
-    <button id="stopBtn">Stop</button>
+
+  <h2>Camera — Access</h2>
+
+  <div class="frame">
+    <video id="video" autoplay playsinline></video>
+    <div id="flash" class="flash"></div>
   </div>
-  <div class="info">Open this page on your phone and allow camera access. Use the Start button if camera doesn't start automatically.</div>
 
-  <script>
-    const video = document.getElementById('video');
-    const startBtn = document.getElementById('startBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    let stream = null;
+  <canvas id="canvas" style="display:none;"></canvas>
 
-    async function startCamera() {
-      try {
-        // Use environment facing camera on phones if available
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
-        video.srcObject = stream;
-      } catch (err) {
-        alert('Could not start camera: ' + err.message);
+  <div class="controls">
+    <button id="startBtn" class="primary">Start Camera</button>
+    <button id="switchBtn" class="ghost">Switch Camera</button>
+    <button id="captureBtn" class="primary">Capture Photo</button>
+    <a id="downloadLink" class="download" download="photo.png">Download Photo</a>
+    <button id="stopBtn" class="warn">Stop Camera</button>
+  </div>
+
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+    <label style="opacity:.9">Camera:</label>
+    <select id="deviceSelect"></select>
+  </div>
+
+  <div id="previewWrapper" style="width:100%;max-width:720px;"></div>
+  <div class="small">Captured photos are saved locally. On mobile, use long-press to save if your browser opens the image instead of downloading.</div>
+
+<script>
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const captureBtn = document.getElementById('captureBtn');
+  const downloadLink = document.getElementById('downloadLink');
+  const switchBtn = document.getElementById('switchBtn');
+  const deviceSelect = document.getElementById('deviceSelect');
+  const previewWrapper = document.getElementById('previewWrapper');
+  const flash = document.getElementById('flash');
+
+  let stream = null;
+  let currentDeviceId = null;
+  let videoDevices = []; // array of MediaDeviceInfo for videoinput
+
+  // enumerate cameras (call before starting)
+  async function updateDeviceList() {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      videoDevices = devices.filter(d => d.kind === 'videoinput');
+      // populate select
+      deviceSelect.innerHTML = '';
+      videoDevices.forEach((d, idx) => {
+        const label = d.label || `Camera ${idx+1}`;
+        const opt = document.createElement('option');
+        opt.value = d.deviceId;
+        opt.text = label;
+        deviceSelect.appendChild(opt);
+      });
+      // if there is at least one device and we don't have currentDeviceId, pick first
+      if(videoDevices.length && !currentDeviceId) {
+        currentDeviceId = videoDevices[0].deviceId;
       }
+      // enable/disable switch button depending on count
+      switchBtn.disabled = (videoDevices.length <= 1);
+      deviceSelect.disabled = (videoDevices.length === 0);
+    } catch (err) {
+      console.warn('Could not enumerate devices', err);
+    }
+  }
+
+  // start camera using deviceId if provided, else fallback to facingMode
+  async function startCamera(deviceId = null) {
+    try {
+      // stop existing
+      stopCamera();
+      const constraints = {
+        video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "environment" },
+        audio: false
+      };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      // set currentDeviceId from active track
+      const videoTrack = stream.getVideoTracks()[0];
+      currentDeviceId = videoTrack.getSettings?.().deviceId || currentDeviceId;
+      video.srcObject = stream;
+      await video.play();
+      // update device list labels and select value (labels appear only after permission)
+      await updateDeviceList();
+      if (currentDeviceId) deviceSelect.value = currentDeviceId;
+      downloadLink.style.display = 'none';
+      previewWrapper.innerHTML = '';
+    } catch (err) {
+      alert('Could not start camera: ' + err.message);
+      console.error(err);
+    }
+  }
+
+  function stopCamera() {
+    if (stream) {
+      stream.getTracks().forEach(t => t.stop());
+      stream = null;
+      video.srcObject = null;
+    }
+  }
+
+  // switch to next camera in the list
+  async function switchCamera() {
+    if (!videoDevices.length) {
+      await updateDeviceList();
+      if (!videoDevices.length) return alert('No camera devices found.');
+    }
+    // find current index
+    const idx = videoDevices.findIndex(d => d.deviceId === currentDeviceId);
+    const nextIdx = (idx + 1) % videoDevices.length;
+    const nextDeviceId = videoDevices[nextIdx].deviceId;
+    await startCamera(nextDeviceId);
+  }
+
+  // select camera from dropdown
+  deviceSelect.addEventListener('change', async (e) => {
+    const id = e.target.value;
+    if (id) await startCamera(id);
+  });
+
+  // flash animation
+  function doFlash() {
+    flash.classList.add('on');
+    setTimeout(()=> flash.classList.remove('on'), 120);
+  }
+
+  // capture current frame and prepare download link + preview
+  function capturePhoto() {
+    if (!video.videoWidth) return alert('Camera not ready!');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    // if user-facing cam, mirror the capture horizontally to match preview
+    const track = stream?.getVideoTracks()[0];
+    const settings = track?.getSettings?.() || {};
+    const isUserFacing = (settings.facingMode === 'user') || false;
+
+    if (isUserFacing) {
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.setTransform(1,0,0,1,0,0); // reset transform
+    } else {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     }
 
-    function stopCamera() {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-        video.srcObject = null;
-        stream = null;
-      }
-    }
+    const dataURL = canvas.toDataURL('image/png');
+    downloadLink.href = dataURL;
+    downloadLink.download = `photo_${Date.now()}.png`;
+    downloadLink.style.display = 'inline-block';
 
-    // Start automatically if allowed
-    startCamera();
+    previewWrapper.innerHTML = `<img class="preview" src="${dataURL}" alt="captured photo" style="margin-top:10px;border-radius:10px;">`;
 
-    startBtn.addEventListener('click', startCamera);
-    stopBtn.addEventListener('click', stopCamera);
-  </script>
+    // small flash
+    doFlash();
+  }
+
+  // wire buttons
+  startBtn.addEventListener('click', async () => {
+    await updateDeviceList();
+    // if a device is selected in dropdown, use it
+    const chosen = deviceSelect.value || currentDeviceId;
+    await startCamera(chosen || null);
+  });
+
+  stopBtn.addEventListener('click', () => {
+    stopCamera();
+    downloadLink.style.display = 'none';
+    previewWrapper.innerHTML = '';
+  });
+
+  captureBtn.addEventListener('click', capturePhoto);
+  switchBtn.addEventListener('click', switchCamera);
+
+  // auto start on load (requests permission)
+  (async () => {
+    await updateDeviceList();
+    // try to start environment camera first
+    try { await startCamera(currentDeviceId || null); } catch(e){ /* ignore */ }
+  })();
+
+  // On page unload, stop camera
+  window.addEventListener('beforeunload', () => stopCamera());
+</script>
+
 </body>
 </html>
